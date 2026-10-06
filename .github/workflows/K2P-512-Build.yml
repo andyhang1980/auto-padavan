@@ -28,29 +28,6 @@ jobs:
         sh dl_toolchain.sh
         mkdir -p /opt/images/
 
-    - name: Update SS core (shadowsocks-libev 3.3.5 -> 3.3.6)
-      run: |
-        cd /opt/rt-n56u/trunk/user/shadowsocks
-        # 清理旧版本源码包
-        rm -rf shadowsocks-libev-3.3.5 shadowsocks-libev-3.3.5.tar.gz
-        # 下载最新 shadowsocks-libev 3.3.6 (发布页: https://github.com/shadowsocks/shadowsocks-c/releases/tag/v3.3.6)
-        wget -q --timeout=60 -t3 https://github.com/shadowsocks/shadowsocks-c/releases/download/v3.3.6/shadowsocks-libev-3.3.6.tar.gz
-        test -f shadowsocks-libev-3.3.6.tar.gz || { echo "SS core download failed"; exit 1; }
-        # 校验解压目录名与 Makefile 中 SRC_SS_NAME 一致
-        TOPDIR=$(tar tzf shadowsocks-libev-3.3.6.tar.gz | head -1 | cut -d/ -f1)
-        if [ "$TOPDIR" != "shadowsocks-libev-3.3.6" ]; then
-          echo "Fixing source dir name: $TOPDIR -> shadowsocks-libev-3.3.6"
-          mkdir -p /tmp/ss-rename
-          tar xf shadowsocks-libev-3.3.6.tar.gz -C /tmp/ss-rename
-          mv "/tmp/ss-rename/$TOPDIR" /tmp/ss-rename/shadowsocks-libev-3.3.6
-          tar czf shadowsocks-libev-3.3.6.tar.gz -C /tmp/ss-rename shadowsocks-libev-3.3.6
-          rm -rf /tmp/ss-rename
-        fi
-        # 更新 Makefile 中的版本号
-        sed -i 's/^SRC_SS_NAME=.*/SRC_SS_NAME=shadowsocks-libev-3.3.6/' Makefile
-        grep '^SRC_SS_NAME=' Makefile
-      # 注: SSR 核心 (shadowsocksr-libev) 当前固定 e2373d7 已是 shadowsocksr-backup 仓库 master 最新提交，无更新版本
-
     - name: Add anti-freeze network watchdog
       run: |
         ###############################################
