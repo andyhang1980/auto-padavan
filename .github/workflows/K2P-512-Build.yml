@@ -27,7 +27,30 @@ jobs:
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh
         mkdir -p /opt/images/
-    
+
+    - name: Update SS core (shadowsocks-libev 3.3.5 -> 3.3.6)
+      run: |
+        cd /opt/rt-n56u/trunk/user/shadowsocks
+        # 清理旧版本源码包
+        rm -rf shadowsocks-libev-3.3.5 shadowsocks-libev-3.3.5.tar.gz
+        # 下载最新 shadowsocks-libev 3.3.6 (发布页: https://github.com/shadowsocks/shadowsocks-c/releases/tag/v3.3.6)
+        wget -q --timeout=60 -t3 https://github.com/shadowsocks/shadowsocks-c/releases/download/v3.3.6/shadowsocks-libev-3.3.6.tar.gz
+        test -f shadowsocks-libev-3.3.6.tar.gz || { echo "SS core download failed"; exit 1; }
+        # 校验解压目录名与 Makefile 中 SRC_SS_NAME 一致
+        TOPDIR=$(tar tzf shadowsocks-libev-3.3.6.tar.gz | head -1 | cut -d/ -f1)
+        if [ "$TOPDIR" != "shadowsocks-libev-3.3.6" ]; then
+          echo "Fixing source dir name: $TOPDIR -> shadowsocks-libev-3.3.6"
+          mkdir -p /tmp/ss-rename
+          tar xf shadowsocks-libev-3.3.6.tar.gz -C /tmp/ss-rename
+          mv "/tmp/ss-rename/$TOPDIR" /tmp/ss-rename/shadowsocks-libev-3.3.6
+          tar czf shadowsocks-libev-3.3.6.tar.gz -C /tmp/ss-rename shadowsocks-libev-3.3.6
+          rm -rf /tmp/ss-rename
+        fi
+        # 更新 Makefile 中的版本号
+        sed -i 's/^SRC_SS_NAME=.*/SRC_SS_NAME=shadowsocks-libev-3.3.6/' Makefile
+        grep '^SRC_SS_NAME=' Makefile
+      # 注: SSR 核心 (shadowsocksr-libev) 当前固定 e2373d7 已是 shadowsocksr-backup 仓库 master 最新提交，无更新版本
+
     - name: Build Firmware
       env:
         TNAME: K2P-USB-512
@@ -103,83 +126,15 @@ jobs:
         echo "CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y" >> .config
         
         ################################################################################################
-        # K2P-512 自定义脚本 - 修复已知问题
+        # K2P-512 自定义说明
         ################################################################################################
-        # 1. 修复 DNS 解析问题 - 使用公共 DNS 防止 DNS 污染
+        # Padavan 的用户脚本通过 Web 界面(扩展功能->自定义脚本)写入 nvram(/etc/storage/)，
+        # 不随源码树打包进固件。编译期只能修改 defaults.h 等默认值。
+        # DNS/防火墙/MTU 等问题请刷机后在 Web 界面配置，不要使用 uci 命令(Padavan 无 uci)。
         sed -i 's/DEF_NTP_SERVER0.*/DEF_NTP_SERVER0 "ntp1.aliyun.com"/' user/shared/defaults.h
         sed -i 's/DEF_NTP_SERVER1.*/DEF_NTP_SERVER1 "ntp.aliyun.com"/' user/shared/defaults.h
-        
-        # 2. 创建网络修复脚本 - 解决部分 App 无法联网问题
-        mkdir -p /opt/rt-n56u/trunk/user/scripts
-        cat > /opt/rt-n56u/trunk/user/scripts/network_fix.sh << 'EOF'
-#!/bin/sh
-# K2P-512 网络修复脚本 - 解决部分 App 无法联网问题
+        echo "TNAME=$TNAME" >> $GITHUB_ENV
 
-# 修复 DNS 设置 - 使用公共 DNS
-uci set dhcp.@dnsmasq[0].server='223.5.5.5 119.29.29.29 8.8.8.8'
-uci commit dhcp
-
-# 修复防火墙规则 - 允许所有流量
-iptables -F
-iptables -t nat -F
-iptables -t mangle -F
-iptables -X
-iptables -t nat -X
-iptables -t mangle -X
-
-# 允许所有 INPUT 流量
-iptables -P INPUT ACCEPT
-# 允许所有 FORWARD 流量
-iptables -P FORWARD ACCEPT
-# 允许所有 OUTPUT 流量
-iptables -P OUTPUT ACCEPT
-
-# 修复 MTU 设置 - 防止大包被丢弃
-ifconfig eth0 mtu 1500
-ifconfig br0 mtu 1500
-
-# 禁用 IPv6 - 避免 IPv6 导致的连接问题
-echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null
-echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null
-
-# 重启网络服务
-/etc/init.d/network restart
-EOF
-        
-        # 3. 创建自动重启脚本（防止内存泄漏）
-        cat > /opt/rt-n56u/trunk/user/scripts/autoreboot.sh << 'EOF'
-#!/bin/sh
-# K2P-512 自动重启脚本 - 防止内存泄漏
-# 每天凌晨4点重启路由器
-echo "0 4 * * * /sbin/reboot" >> /etc/crontabs/root
-EOF
-        
-        # 4. 创建 USB 存储优化脚本
-        cat > /opt/rt-n56u/trunk/user/scripts/usb_optimize.sh << 'EOF'
-#!/bin/sh
-# K2P-512 USB 存储优化
-# 优化 USB 存储挂载参数
-mount -o remount,noatime,nodiratime /mnt 2>/dev/null
-EOF
-        
-        # 5. 创建 WiFi 稳定性优化脚本
-        cat > /opt/rt-n56u/trunk/user/scripts/wifi_stable.sh << 'EOF'
-#!/bin/sh
-# K2P-512 WiFi 稳定性优化
-# 设置 WiFi 组密钥更新间隔，防止 5GHz 掉线
-iwpriv ra0 set GroupRekey=86400 2>/dev/null
-iwpriv rai0 set GroupRekey=86400 2>/dev/null
-EOF
-        
-        # 6. 创建启动时自动执行网络修复的脚本
-        cat > /opt/rt-n56u/trunk/user/scripts/init_network_fix.sh << 'EOF'
-#!/bin/sh
-# K2P-512 启动时自动执行网络修复
-sleep 30
-/opt/rt-n56u/trunk/user/scripts/network_fix.sh
-EOF
-        chmod +x /opt/rt-n56u/trunk/user/scripts/*.sh
-        
         ################################################################################################
         # 编译固件
         ################################################################################################
@@ -192,7 +147,7 @@ EOF
       run: |
         cd /opt/rt-n56u
         GIT_VERSION=`git rev-parse --short=7 HEAD 2>/dev/null` && [ -n "$GIT_VERSION" ] && \
-        image_name=images_${build_variant}_${GIT_VERSION} || image_name=images_${build_variant}
+        image_name=images_${TNAME}_${GIT_VERSION} || image_name=images_${TNAME}
         cd /opt/images; md5sum *.trx |tee md5sum.txt; 7z a -mx=9 ${image_name}.7z ./*
         echo "image_name=${image_name}" >> $GITHUB_ENV
           
