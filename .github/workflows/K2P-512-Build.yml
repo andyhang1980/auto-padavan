@@ -1,0 +1,214 @@
+name: Build K2P-512 Padavan
+
+on: 
+  repository_dispatch:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@master
+      
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd fakeroot \
+        cpio git python3-docutils gettext automake autopoint texinfo build-essential help2man \
+        pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget
+        
+    - name: Clone source code
+      run: |
+        git clone --depth=1 https://github.com/a0575/padavan.git /opt/rt-n56u
+        cd /opt/rt-n56u/toolchain-mipsel
+        sh dl_toolchain.sh
+        mkdir -p /opt/images/
+    
+    - name: Build Firmware
+      env:
+        TNAME: K2P-USB-512
+      run: |
+        cd /opt/rt-n56u/trunk
+        ################################################################################################
+        # 修改默认IP地址（如需修改请取消注释并修改）
+        ################################################################################################
+        #sed -i 's/192.168.123.1/192.168.x.x/g' user/shared/defaults.h
+        if [ ! -f configs/templates/$TNAME.config ] ; then
+        echo "configs/templates/$TNAME.config not found "
+        exit 1
+        fi
+        cp -f configs/templates/$TNAME.config .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=n/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y/g' .config
+        ################################################################################################
+        # K2P-512 优化配置 - 修复已知问题
+        ################################################################################################
+        # 1. 禁用可能导致内存泄漏的服务
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SSSERVER/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ADBYBY/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPC/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TUNSAFE/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ALIDDNS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SMARTDNS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SRELAY/d' .config
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=n/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y/g' .config
+        
+        ################################################################################################
+        # K2P-512 功能配置 - 根据需求调整
+        ################################################################################################
+        # 科学上网（K2P-512 内存有限，建议按需启用）
+        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SSOBFS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SSSERVER=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
+        
+        # 广告过滤（K2P-512 内存有限，建议禁用）
+        echo "CONFIG_FIRMWARE_INCLUDE_ADBYBY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=n" >> .config
+        
+        # DNS 服务（K2P-512 内存有限，建议禁用额外 DNS 服务）
+        echo "CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=n" >> .config
+        
+        # 文件管理（USB 存储相关）
+        echo "CONFIG_FIRMWARE_INCLUDE_CADDY=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ARIA2_NEW_PREBUILD_BIN=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ARIA_WEB_CONTROL=y" >> .config
+        
+        # 其他功能
+        echo "CONFIG_FIRMWARE_INCLUDE_WYY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_WYYBIN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SRELAY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_FRPS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n" >> .config
+        
+        # K2P-512 稳定性优化
+        echo "CONFIG_FIRMWARE_INCLUDE_SFE=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_HTOP=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TCPDUMP=y" >> .config
+        
+        ################################################################################################
+        # K2P-512 自定义脚本 - 修复已知问题
+        ################################################################################################
+        # 1. 修复 DNS 解析问题 - 使用公共 DNS 防止 DNS 污染
+        sed -i 's/DEF_NTP_SERVER0.*/DEF_NTP_SERVER0 "ntp1.aliyun.com"/' user/shared/defaults.h
+        sed -i 's/DEF_NTP_SERVER1.*/DEF_NTP_SERVER1 "ntp.aliyun.com"/' user/shared/defaults.h
+        
+        # 2. 创建网络修复脚本 - 解决部分 App 无法联网问题
+        mkdir -p /opt/rt-n56u/trunk/user/scripts
+        cat > /opt/rt-n56u/trunk/user/scripts/network_fix.sh << 'EOF'
+#!/bin/sh
+# K2P-512 网络修复脚本 - 解决部分 App 无法联网问题
+
+# 修复 DNS 设置 - 使用公共 DNS
+uci set dhcp.@dnsmasq[0].server='223.5.5.5 119.29.29.29 8.8.8.8'
+uci commit dhcp
+
+# 修复防火墙规则 - 允许所有流量
+iptables -F
+iptables -t nat -F
+iptables -t mangle -F
+iptables -X
+iptables -t nat -X
+iptables -t mangle -X
+
+# 允许所有 INPUT 流量
+iptables -P INPUT ACCEPT
+# 允许所有 FORWARD 流量
+iptables -P FORWARD ACCEPT
+# 允许所有 OUTPUT 流量
+iptables -P OUTPUT ACCEPT
+
+# 修复 MTU 设置 - 防止大包被丢弃
+ifconfig eth0 mtu 1500
+ifconfig br0 mtu 1500
+
+# 禁用 IPv6 - 避免 IPv6 导致的连接问题
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null
+echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null
+
+# 重启网络服务
+/etc/init.d/network restart
+EOF
+        
+        # 3. 创建自动重启脚本（防止内存泄漏）
+        cat > /opt/rt-n56u/trunk/user/scripts/autoreboot.sh << 'EOF'
+#!/bin/sh
+# K2P-512 自动重启脚本 - 防止内存泄漏
+# 每天凌晨4点重启路由器
+echo "0 4 * * * /sbin/reboot" >> /etc/crontabs/root
+EOF
+        
+        # 4. 创建 USB 存储优化脚本
+        cat > /opt/rt-n56u/trunk/user/scripts/usb_optimize.sh << 'EOF'
+#!/bin/sh
+# K2P-512 USB 存储优化
+# 优化 USB 存储挂载参数
+mount -o remount,noatime,nodiratime /mnt 2>/dev/null
+EOF
+        
+        # 5. 创建 WiFi 稳定性优化脚本
+        cat > /opt/rt-n56u/trunk/user/scripts/wifi_stable.sh << 'EOF'
+#!/bin/sh
+# K2P-512 WiFi 稳定性优化
+# 设置 WiFi 组密钥更新间隔，防止 5GHz 掉线
+iwpriv ra0 set GroupRekey=86400 2>/dev/null
+iwpriv rai0 set GroupRekey=86400 2>/dev/null
+EOF
+        
+        # 6. 创建启动时自动执行网络修复的脚本
+        cat > /opt/rt-n56u/trunk/user/scripts/init_network_fix.sh << 'EOF'
+#!/bin/sh
+# K2P-512 启动时自动执行网络修复
+sleep 30
+/opt/rt-n56u/trunk/user/scripts/network_fix.sh
+EOF
+        chmod +x /opt/rt-n56u/trunk/user/scripts/*.sh
+        
+        ################################################################################################
+        # 编译固件
+        ################################################################################################
+        sudo ./clear_tree
+        sudo ./build_firmware_modify $TNAME 0
+        sudo mv -f images/*.trx /opt/images
+    
+    - name: Create archive
+      if: ${{ github.event_name != 'release' && success() }}
+      run: |
+        cd /opt/rt-n56u
+        GIT_VERSION=`git rev-parse --short=7 HEAD 2>/dev/null` && [ -n "$GIT_VERSION" ] && \
+        image_name=images_${build_variant}_${GIT_VERSION} || image_name=images_${build_variant}
+        cd /opt/images; md5sum *.trx |tee md5sum.txt; 7z a -mx=9 ${image_name}.7z ./*
+        echo "image_name=${image_name}" >> $GITHUB_ENV
+          
+    - name: Generate release tag
+      id: tag
+      run: |
+        echo "::set-output name=release_tag::K2P-512_$(date +%Y-%m-%d)"
+        touch release.txt
+        echo "::set-output name=status::success"
+        
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.workflow_token }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: /opt/images/*.trx
