@@ -51,6 +51,34 @@ jobs:
         grep '^SRC_SS_NAME=' Makefile
       # 注: SSR 核心 (shadowsocksr-libev) 当前固定 e2373d7 已是 shadowsocksr-backup 仓库 master 最新提交，无更新版本
 
+    - name: Add anti-freeze network watchdog
+      run: |
+        ###############################################
+        # 卡死自动恢复: 检测卡死 -> 停止无关程序 -> 保证联网 -> 必要时重启
+        ###############################################
+        # 1. 复制看门狗脚本(来自本仓库, 纳入版本管理)
+        cp "$GITHUB_WORKSPACE/trunk/user/scripts/network_watchdog.sh" /opt/rt-n56u/trunk/user/scripts/network_watchdog.sh
+        chmod +x /opt/rt-n56u/trunk/user/scripts/network_watchdog.sh
+
+        # 2. 打包进固件: scripts/Makefile romfs 目标追加安装到 /usr/bin/
+        printf '\t$(ROMFSINST) -p +x ./network_watchdog.sh /usr/bin/network_watchdog.sh\n' >> /opt/rt-n56u/trunk/user/scripts/Makefile
+
+        # 3. 注册 cron: rc.c init_crontab() 每分钟执行 (仿 ss-watchcat 机制)
+        python3 - << 'PYEOF'
+        p = '/opt/rt-n56u/trunk/user/rc/rc.c'
+        s = open(p).read()
+        anchor = 'int ret = 0; //no change'
+        assert anchor in s, 'rc.c anchor not found, source changed!'
+        ins = anchor + '\n\tret |= system("/sbin/check_crontab.sh a/1 a a a a network_watchdog.sh");'
+        s = s.replace(anchor, ins, 1)
+        open(p, 'w').write(s)
+        print('rc.c patched: cron registered')
+        PYEOF
+
+        # 4. 校验
+        grep -q 'network_watchdog' /opt/rt-n56u/trunk/user/scripts/Makefile && echo "Makefile OK"
+        grep -q 'network_watchdog' /opt/rt-n56u/trunk/user/rc/rc.c && echo "rc.c OK"
+
     - name: Build Firmware
       env:
         TNAME: K2P-USB-512
