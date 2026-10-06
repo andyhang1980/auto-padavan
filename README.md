@@ -1,11 +1,25 @@
-* 在线云编译自己的padavan设备固件
+* 在线云编译自己的padavan设备固件（原 auto-padavan / Padavan-build / Padavan-Build-TB 三仓库已整合至此）
 * 支持修改默认IP,支持自定义增减插件
 * 源码更新后自动编译已配置设备固件
 
+#### 工作流一览 ####
+* `K2P-512-Build.yml` — K2P-USB-512（a0575/padavan，含 SS 3.3.6 核心更新 + 卡死自动恢复看门狗）
+* `Diy Build.yml` — 自定义配置编译（a0575/padavan，repository_dispatch 触发）
+* `build-padavan.yml` — 推送 v* 标签或发布 Release 时编译 K2P-USB-512
+* `Hanwckf_CI.yml` — hanwckf/rt-n56u 源码，多设备矩阵编译
+* `Hanwckf_4.4_kernal_CI.yml` — hanwckf/padavan-4.4 源码
+* `MeIsReallyBa_4.4_kernal_CI.yml` — MeIsReallyBa/padavan-4.4 源码（K2P / R2100）
+* `vb1980_kvr_CI.yml` — vb1980/Padavan-KVR 源码
+* `update-checker.yml` — a0575/padavan 源码更新后自动触发编译
+* `Test.yml` — 测试用编译
+* `delete_old_workflow_runs.yml` — 手动清理历史运行记录
+
+注意：TB 系列工作流仅在**仓库 owner 本人点 Star** 或手动 `Run workflow` 时运行（`if: owner.id == sender.id`）。
+
 #### 固件说明 ####
-* 默认登陆IP:192.168.123.1 
+* 默认登陆IP:192.168.123.1（TB 系列为 192.168.2.1）
 * 默认用户名/密码:admin/admin
-* 默认wifi密码:12346789
+* 默认wifi密码:12346789（TB 系列为 1234567890）
 * 
 #### 支持设备 ####
 * PSG1208 /PSG1218 /NEWIFI-MINI /MI-MINI /MI-3 
