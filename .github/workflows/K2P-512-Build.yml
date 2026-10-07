@@ -129,6 +129,7 @@ jobs:
         '\tcmake . \\\n'
         '\t\t-DCMAKE_TOOLCHAIN_FILE=$(THISDIR)/mipsel-tc.cmake \\\n'
         '\t\t-DCMAKE_BUILD_TYPE=Release \\\n'
+        '\t\t-DDISABLE_SSP=ON \\\n'
         '\t\t-DBUILD_TESTING=OFF ; \\\n'
         '\t)\n')
         s = s[:i] + new + s[j+1:]
