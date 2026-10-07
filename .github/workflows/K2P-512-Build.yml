@@ -28,6 +28,181 @@ jobs:
         sh dl_toolchain.sh
         mkdir -p /opt/images/
 
+    - name: Update SS core to 3.3.6 (CMake build)
+      run: |
+        set -e
+        SSDIR=/opt/rt-n56u/trunk/user/shadowsocks
+        cd "$SSDIR"
+
+        ################################################################################
+        # shadowsocks-libev 3.3.6 (shadowsocks/shadowsocks-c, 2026-02) 已改为纯 CMake 工程,
+        # release 包内无 configure/autogen, 且 libcork/libipset/libbloom 子模块目录为空,
+        # 因此不能沿用 autotools 流程, 需: 补子模块 + 去 -Werror + Makefile 改走 cmake。
+        ################################################################################
+        wget -q --timeout=60 -t3 -O shadowsocks-libev-3.3.6.tar.gz \
+          https://github.com/shadowsocks/shadowsocks-c/releases/download/v3.3.6/shadowsocks-libev-3.3.6.tar.gz
+        test -s shadowsocks-libev-3.3.6.tar.gz
+        tar xf shadowsocks-libev-3.3.6.tar.gz
+        cd shadowsocks-libev-3.3.6
+
+        # 1) 补齐 release 包缺失的子模块源码
+        for pair in libcork:libcork ipset:libipset libbloom:libbloom; do
+          repo=${pair%%:*}; dest=${pair##*:}
+          if [ -z "$(ls -A "$dest" 2>/dev/null)" ]; then
+            mkdir -p "$dest"
+            git clone --depth=1 -q "https://github.com/shadowsocks/$repo.git" "/tmp/sssub-$repo"
+            cp -a "/tmp/sssub-$repo/." "$dest/"
+            rm -rf "/tmp/sssub-$repo"
+          fi
+        done
+        test -f libcork/src/libcork/core/error.c
+        test -f libipset/src/libipset/set/storage.c
+        test -f libbloom/bloom.c
+
+        # 2) 旧 mips uclibc gcc 对新源码的告警会经 -Werror 变成错误, 去掉 -Werror
+        grep -q -- '-Werror' src/CMakeLists.txt
+        sed -i 's/-Werror//g' src/CMakeLists.txt
+        ! grep -q -- '-Werror' src/CMakeLists.txt
+
+        # 3) 根 CMakeLists 跳过 doc 子目录(避免依赖 asciidoc/xmlto)
+        grep -q '^add_subdirectory(doc)' CMakeLists.txt
+        sed -i 's/^add_subdirectory(doc)/#add_subdirectory(doc)/' CMakeLists.txt
+
+        cd "$SSDIR"
+
+        # 4) 重写 shadowsocks/Makefile: configure_ss 改为 cmake 交叉配置, romfs 改取 bin/ 产物
+        python3 - << 'SS_MK_PY'
+        p = '/opt/rt-n56u/trunk/user/shadowsocks/Makefile'
+        s = open(p).read()
+
+        # 4.1 all 目标: 只编静态 ss 程序(跳过 shared/doc 等目标)
+        a = '\t$(MAKE) -j$(HOST_NCPU) -C $(SRC_SS_NAME)\n'
+        assert s.count(a) == 1, 'anchor: all SS make line'
+        s = s.replace(a, '\t$(MAKE) -j$(HOST_NCPU) -C $(SRC_SS_NAME) ss-local ss-redir ss-tunnel ss-server\n')
+
+        # 4.2 configure_ss: autotools ./configure -> cmake (生成 mipsel 交叉工具链文件)
+        assert s.count('configure_ss:') == 1, 'anchor: configure_ss target'
+        i = s.index('configure_ss:')
+        j = s.index('\nclean: clean_ssr clean_ss')
+        blk = s[i:j]
+        assert 'ac_cv_prog_PCRE_CONFIG' in blk and '--host=$(HOST_TARGET)' in blk, 'configure_ss block content'
+        fmt = (r'set(CMAKE_SYSTEM_NAME Linux)\n'
+               r'set(CMAKE_SYSTEM_PROCESSOR mips)\n'
+               r'set(CMAKE_C_COMPILER "%s")\n'
+               r'set(CMAKE_CXX_COMPILER "%s")\n'
+               r'set(CMAKE_PREFIX_PATH "%s")\n'
+               r'set(CMAKE_PROGRAM_PATH "%s/bin")\n'
+               r'set(CMAKE_C_FLAGS_INIT "%s -I%s/include")\n'
+               r'set(CMAKE_EXE_LINKER_FLAGS_INIT "-L%s/lib")\n')
+        printf_line = (
+            "\tprintf '" + fmt + "' "
+            '"$(CROSS_COMPILE)gcc" "$(CROSS_COMPILE)g++" "$(STAGEDIR)" "$(STAGEDIR)" '
+            '"$(CPUFLAGS)" "$(STAGEDIR)" "$(STAGEDIR)" > $(THISDIR)/mipsel-tc.cmake ; \\\n')
+        new = (
+            'configure_ss:\n'
+            '\t( cd $(SRC_SS_NAME) ; \\\n'
+            '\trm -rf CMakeCache.txt CMakeFiles ; \\\n'
+            + printf_line +
+            '\tPKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$(STAGEDIR)/lib/pkgconfig" \\\n'
+            '\tcmake . \\\n'
+            '\t\t-DCMAKE_TOOLCHAIN_FILE=$(THISDIR)/mipsel-tc.cmake \\\n'
+            '\t\t-DCMAKE_BUILD_TYPE=Release \\\n'
+            '\t\t-DBUILD_TESTING=OFF \\\n'
+            '\t\t-DWITH_DOC_MAN=OFF \\\n'
+            '\t\t-DWITH_DOC_HTML=OFF ; \\\n'
+            '\t)\n')
+        s = s[:i] + new + s[j+1:]
+
+        # 4.3 romfs: cmake 产物位于 bin/ 而非 src/
+        for t in ('ss-redir', 'ss-tunnel', 'ss-local', 'ss-server'):
+            a = '$(THISDIR)/$(SRC_SS_NAME)/src/%s' % t
+            assert s.count(a) == 1, 'anchor: romfs ' + t
+            s = s.replace(a, '$(THISDIR)/$(SRC_SS_NAME)/bin/%s' % t)
+
+        open(p, 'w').write(s)
+        print('shadowsocks/Makefile patched: cmake build, romfs -> bin/')
+        SS_MK_PY
+
+        # 5) libs/Makefile: SHADOWSOCKS 依赖新增 libpcre2(3.3.6 需要 PCRE2, 原树只有 PCRE1)
+        #    并创建 trunk/libs/libpcre2 包(源码包在 CI 内下载)
+        python3 - << 'SS_LIBS_PY'
+        import os, re
+        p = '/opt/rt-n56u/trunk/libs/Makefile'
+        s = open(p).read()
+
+        a = 'LIBS_INCLUDE_LIBPCRE=n'
+        assert s.count(a) == 1, 'anchor: LIBPCRE=n'
+        s = s.replace(a, a + '\nLIBS_INCLUDE_LIBPCRE2=n')
+
+        a = 'ifeq ($(CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS),y)\nLIBS_INCLUDE_LIBPCRE=y'
+        assert s.count(a) == 1, 'anchor: SHADOWSOCKS deps block'
+        s = s.replace(a, a + '\nLIBS_INCLUDE_LIBPCRE2=y')
+
+        m = re.search(r'^dir_\$\(LIBS_INCLUDE_LIBPCRE\)\s*\+= libpcre\s*$', s, re.M)
+        assert m, 'anchor: dir libpcre'
+        s = s[:m.end()] + '\ndir_$(LIBS_INCLUDE_LIBPCRE2) += libpcre2' + s[m.end():]
+        open(p, 'w').write(s)
+
+        d = '/opt/rt-n56u/trunk/libs/libpcre2'
+        os.makedirs(d, exist_ok=True)
+        mk = '\n'.join([
+            'SRC_NAME=pcre2-10.42',
+            'SRC_URL=https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.42/pcre2-10.42.tar.bz2',
+            '',
+            'all: download_test extract_test config_test',
+            '\t$(MAKE) -j$(HOST_NCPU) -C $(SRC_NAME)',
+            '',
+            'download_test:',
+            '\t( if [ ! -f $(SRC_NAME).tar.bz2 ]; then \\',
+            '\t\twget -t5 --timeout=30 --no-check-certificate -O $(SRC_NAME).tar.bz2 $(SRC_URL); \\',
+            '\tfi )',
+            '',
+            'extract_test:',
+            '\t( if [ ! -d $(SRC_NAME) ]; then \\',
+            '\t\ttar xjf $(SRC_NAME).tar.bz2 ; \\',
+            '\tfi )',
+            '',
+            'config_test:',
+            '\t( if [ -f ./config_done ]; then \\',
+            '\t\techo "the same configuration"; \\',
+            '\telse \\',
+            '\t\tmake configure && touch config_done; \\',
+            '\tfi )',
+            '',
+            'configure:',
+            '\t( cd $(SRC_NAME) ; \\',
+            '\t./configure \\',
+            '\t\t--prefix=$(STAGEDIR) \\',
+            '\t\t--disable-pcre2-16 \\',
+            '\t\t--disable-pcre2-32 \\',
+            '\t\t--disable-cpp \\',
+            '\t\t--host=$(HOST_TARGET) \\',
+            '\t\t--build=$(HOST_BUILD) ; \\',
+            '\t)',
+            '',
+            'clean:',
+            '\tif [ -f $(SRC_NAME)/Makefile ] ; then \\',
+            '\t\t$(MAKE) -C $(SRC_NAME) distclean ; \\',
+            '\tfi ; \\',
+            '\trm -f config_done',
+            '',
+            'install:',
+            '\t$(MAKE) -C $(SRC_NAME) install DESTDIR=""',
+            '',
+            'romfs:',
+            '',
+        ])
+        open(d + '/Makefile', 'w').write(mk + '\n')
+        print('libs/Makefile patched + libpcre2 package created')
+        SS_LIBS_PY
+
+        # 6) 校验
+        grep -q 'cmake .' "$SSDIR/Makefile"
+        grep -q '$(SRC_SS_NAME)/bin/ss-local' "$SSDIR/Makefile"
+        grep -q 'libpcre2' /opt/rt-n56u/trunk/libs/Makefile
+        test -f /opt/rt-n56u/trunk/libs/libpcre2/Makefile
+        echo "SS 3.3.6 prepare OK"
+
     - name: Add anti-freeze network watchdog
       run: |
         ###############################################
