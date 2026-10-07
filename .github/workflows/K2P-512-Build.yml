@@ -68,6 +68,15 @@ jobs:
         grep -q '^add_subdirectory(doc)' CMakeLists.txt
         sed -i 's/^add_subdirectory(doc)/#add_subdirectory(doc)/' CMakeLists.txt
 
+        # 3.5) stage 中 mbedtls/c-ares 只安装 .so(包 Makefile 关静态/默认共享),
+        #      而 src/CMakeLists.txt 静态 find_library(*.a) 必然 NOTFOUND → 改用共享库名
+        grep -q 'find_library(LIBMBEDTLS libmbedtls.a' src/CMakeLists.txt
+        grep -q 'find_library(LIBUDNS libcares.a)' src/CMakeLists.txt
+        sed -i 's/find_library(LIBMBEDTLS libmbedtls\.a/find_library(LIBMBEDTLS mbedtls/g' src/CMakeLists.txt
+        sed -i 's/find_library(LIBMBEDCRYPTO libmbedcrypto\.a/find_library(LIBMBEDCRYPTO mbedcrypto/g' src/CMakeLists.txt
+        sed -i 's/find_library(LIBUDNS libcares\.a)/find_library(LIBUDNS cares)/g' src/CMakeLists.txt
+        ! grep -q 'libmbedtls\.a\|libmbedcrypto\.a\|libcares\.a' src/CMakeLists.txt
+
         cd "$SSDIR"
 
         # 4) 重写 shadowsocks/Makefile: configure_ss 改为 cmake 交叉配置, romfs 改取 bin/ 产物
@@ -109,13 +118,11 @@ jobs:
             '\trm -rf CMakeCache.txt CMakeFiles ; \\\n'
             + printf_line +
             '\tPKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$(STAGEDIR)/lib/pkgconfig" \\\n'
-            '\tcmake . \\\n'
-            '\t\t-DCMAKE_TOOLCHAIN_FILE=$(THISDIR)/mipsel-tc.cmake \\\n'
-            '\t\t-DCMAKE_BUILD_TYPE=Release \\\n'
-            '\t\t-DBUILD_TESTING=OFF \\\n'
-            '\t\t-DWITH_DOC_MAN=OFF \\\n'
-            '\t\t-DWITH_DOC_HTML=OFF ; \\\n'
-            '\t)\n')
+        '\tcmake . \\\n'
+        '\t\t-DCMAKE_TOOLCHAIN_FILE=$(THISDIR)/mipsel-tc.cmake \\\n'
+        '\t\t-DCMAKE_BUILD_TYPE=Release \\\n'
+        '\t\t-DBUILD_TESTING=OFF ; \\\n'
+        '\t)\n')
         s = s[:i] + new + s[j+1:]
 
         # 4.3 romfs: cmake 产物位于 bin/ 而非 src/
@@ -209,6 +216,247 @@ jobs:
         test -f /opt/rt-n56u/trunk/libs/libpcre2/Makefile
         echo "SS 3.3.6 prepare OK"
 
+    - name: Add Xray core (VLESS) support
+      run: |
+        set -e
+        ############################################################################
+        # shadowsocks 扩展 xray 内核: ss_type=2 → xray(VLESS, tcp/ws + TLS)
+        # - 服务器/端口/UUID 复用 ss_server / ss_server_port / ss_key
+        # - 新增 nvram: ss_vless_net / ss_vless_tls / ss_vless_host / ss_vless_path
+        # - 透明代理复用 ss-rules(REDIR/TPROXY), xray 以 dokodemo-door 承接本地端口
+        ############################################################################
+        # 1) 新包 trunk/user/xray (本仓库维护, 同看门狗拷入机制)
+        mkdir -p /opt/rt-n56u/trunk/user/xray
+        cp "$GITHUB_WORKSPACE/trunk/user/xray/Makefile" /opt/rt-n56u/trunk/user/xray/Makefile
+        grep -q 'GOMIPS=softfloat' /opt/rt-n56u/trunk/user/xray/Makefile
+
+        # 2) httpd variables.c: 声明 4 个新 nvram 字段(变更触发重启 shadowsocks)
+        python3 - << 'XRAY_VARS_PY'
+        p = '/opt/rt-n56u/trunk/user/httpd/variables.c'
+        s = open(p).read()
+        a = '{"ss_obfs_param","",NULL, EVM_RESTART_SHADOWSOCKS|EVM_RESTART_SS_TUNNEL},'
+        assert s.count(a) == 1, 'anchor: ss_obfs_param'
+        pos = s.index(a) + len(a)
+        line_start = s.rfind('\n', 0, s.index(a)) + 1
+        indent = s[line_start:s.index(a)]
+        lines = [indent + '{"ss_%s","",NULL, EVM_RESTART_SHADOWSOCKS},' % k
+                 for k in ('vless_net', 'vless_tls', 'vless_host', 'vless_path')]
+        s = s[:pos] + '\n' + '\n'.join(lines) + s[pos:]
+        open(p, 'w').write(s)
+        print('variables.c: +4 ss_vless_* keys')
+        XRAY_VARS_PY
+
+        # 3) user/Makefile: xray 随 SHADOWSOCKS_ENABLE 编入
+        python3 - << 'XRAY_UMK_PY'
+        import re
+        p = '/opt/rt-n56u/trunk/user/Makefile'
+        s = open(p).read()
+        m = re.search(r'^dir_\$\(SHADOWSOCKS_ENABLE\)(\s*)\+= shadowsocks$', s, re.M)
+        assert m, 'anchor: dir shadowsocks line'
+        ins = 'dir_$(SHADOWSOCKS_ENABLE)' + m.group(1) + '+= xray'
+        s = s[:m.end()] + '\n' + ins + s[m.end():]
+        open(p, 'w').write(s)
+        print('user/Makefile: xray built with SHADOWSOCKS')
+        XRAY_UMK_PY
+
+        # 4) shadowsocks.sh: ss_type=2 生成 VLESS JSON, 以 xray run 启动, 停止时清理
+        python3 - << 'XRAY_SS_PY'
+        p = '/opt/rt-n56u/trunk/user/shadowsocks/scripts/shadowsocks.sh'
+        s = open(p).read()
+
+        # 4.1 func_gen_ss_json: type2 分支(dokodemo-door 入站 + vless 出站)
+        a = 'func_gen_ss_json(){\n'
+        assert s.count(a) == 1, 'anchor: func_gen_ss_json'
+        branch = (
+            a +
+            '\tif [ "${ss_type:-0}" = "2" ]; then\n'
+            '\t\tvhost="${ss_vless_host:-}"\n'
+            '\t\tif [ "${ss_vless_tls:-0}" = "1" ]; then\n'
+            '\t\t\tsec_json="\\"security\\": \\"tls\\", \\"tlsSettings\\": {\\"serverName\\": \\"${vhost:-$ss_server}\\"}"\n'
+            '\t\telse\n'
+            '\t\t\tsec_json="\\"security\\": \\"none\\""\n'
+            '\t\tfi\n'
+            '\t\tif [ "${ss_vless_net:-tcp}" = "ws" ]; then\n'
+            '\t\t\tif [ -n "$vhost" ]; then\n'
+            '\t\t\t\tstream_json="\\"network\\": \\"ws\\", \\"wsSettings\\": {\\"path\\": \\"${ss_vless_path:-/}\\", \\"headers\\": {\\"Host\\": \\"$vhost\\"}}"\n'
+            '\t\t\telse\n'
+            '\t\t\t\tstream_json="\\"network\\": \\"ws\\", \\"wsSettings\\": {\\"path\\": \\"${ss_vless_path:-/}\\"}"\n'
+            '\t\t\tfi\n'
+            '\t\telse\n'
+            '\t\t\tstream_json="\\"network\\": \\"tcp\\""\n'
+            '\t\tfi\n'
+            '\t\tcat > "$ss_json_file" <<EOF\n'
+            '{\n'
+            '    "log": { "loglevel": "warning" },\n'
+            '    "inbounds": [\n'
+            '        {\n'
+            '            "port": $ss_local_port,\n'
+            '            "protocol": "dokodemo-door",\n'
+            '            "settings": { "network": "tcp,udp", "followRedirect": true },\n'
+            '            "sniffing": { "enabled": true, "destOverride": [ "http", "tls" ] }\n'
+            '        }\n'
+            '    ],\n'
+            '    "outbounds": [\n'
+            '        {\n'
+            '            "protocol": "vless",\n'
+            '            "settings": {\n'
+            '                "vnext": [\n'
+            '                    {\n'
+            '                        "address": "$ss_server",\n'
+            '                        "port": ${ss_server_port:-443},\n'
+            '                        "users": [ { "id": "$ss_key", "encryption": "none" } ]\n'
+            '                    }\n'
+            '                ]\n'
+            '            },\n'
+            '            "streamSettings": { $stream_json, $sec_json }\n'
+            '        }\n'
+            '    ],\n'
+            '    "routing": { "domainStrategy": "AsIs" }\n'
+            '}\n'
+            'EOF\n'
+            '\t\treturn 0\n'
+            '\tfi\n')
+        s = s.replace(a, branch, 1)
+
+        # 4.2 func_start_ss_redir: type2 用 xray run 启动(-u 等 ss 参数不适用)
+        a = 'func_start_ss_redir(){\n'
+        assert s.count(a) == 1, 'anchor: func_start_ss_redir'
+        branch = (
+            a +
+            '\tif [ "${ss_type:-0}" = "2" ]; then\n'
+            '\t\tsh -c "xray run -c $ss_json_file & "\n'
+            '\t\treturn $?\n'
+            '\tfi\n')
+        s = s.replace(a, branch, 1)
+
+        # 4.3 func_stop: 同时清理 xray
+        a = '\tkillall -q $ss_bin\n'
+        assert s.count(a) == 1, 'anchor: killall ss_bin'
+        s = s.replace(a, a + '\tkillall -q xray\n', 1)
+
+        open(p, 'w').write(s)
+        print('shadowsocks.sh: type2 xray branch added')
+        XRAY_SS_PY
+
+        # 5) ss-tunnel.sh: xray 模式下 ss-tunnel 不适用(VLESS 无对应客户端), 跳过启动
+        python3 - << 'XRAY_TUN_PY'
+        p = '/opt/rt-n56u/trunk/user/shadowsocks/scripts/ss-tunnel.sh'
+        s = open(p).read()
+        a = 'func_start_ss_tunnel(){\n'
+        assert s.count(a) == 1, 'anchor: func_start_ss_tunnel'
+        s = s.replace(a, a + '\t[ "${ss_type:-0}" = "2" ] && return 0\n', 1)
+        open(p, 'w').write(s)
+        print('ss-tunnel.sh: skip when xray mode')
+        XRAY_TUN_PY
+
+        # 6) Shadowsocks.asp: ss_type 加 Xray(VLESS) 选项 + VLESS 表单行 + 显隐逻辑
+        python3 - << 'XRAY_ASP_PY'
+        p = '/opt/rt-n56u/trunk/user/www/n56u_ribbon_fixed/Shadowsocks.asp'
+        s = open(p).read()
+
+        # 6.1 下拉选项
+        a = '<option value="1" >SSR</option>'
+        assert s.count(a) == 1, 'anchor: SSR option'
+        s = s.replace(a, a + '\n                                                    <option value="2" >Xray (VLESS)</option>', 1)
+
+        # 6.2 method/timeout 行加 id 以便 xray 模式隐藏
+        a = '<tr> <th width="50%"><#menu5_16_7#></th>'
+        assert s.count(a) == 1, 'anchor: method row'
+        s = s.replace(a, '<tr id="row_ss_method"> <th width="50%"><#menu5_16_7#></th>', 1)
+        a = '<tr> <th width="50%"><#menu5_16_21#></th>'
+        assert s.count(a) == 1, 'anchor: timeout row'
+        s = s.replace(a, '<tr id="row_ss_timeout"> <th width="50%"><#menu5_16_21#></th>', 1)
+
+        # 6.3 VLESS 参数行(默认隐藏, xray 模式显示), 插在 本地设置 分节前
+        a = '<tr> <th colspan="2" style="background-color: #E3E3E3;"><#menu5_16_8#></th> </tr>'
+        assert s.count(a) == 1, 'anchor: section menu5_16_8'
+        vless_rows = (
+            '<tr id="row_vless_net" style="display:none;"> <th width="50%">VLESS 传输</th>\n'
+            '                                            <td>\n'
+            '                                                <select name="ss_vless_net" class="input" style="width: 200px;">\n'
+            '                                                    <option value="tcp" >TCP</option>\n'
+            '                                                    <option value="ws" >WebSocket</option>\n'
+            '                                                </select>\n'
+            '                                            </td>\n'
+            '                                        </tr>\n'
+            '\n'
+            '                                        <tr id="row_vless_tls" style="display:none;"> <th width="50%">TLS</th>\n'
+            '                                            <td>\n'
+            '                                                <select name="ss_vless_tls" class="input" style="width: 200px;">\n'
+            '                                                    <option value="0" >关闭</option>\n'
+            '                                                    <option value="1" >开启</option>\n'
+            '                                                </select>\n'
+            '                                            </td>\n'
+            '                                        </tr>\n'
+            '\n'
+            '                                        <tr id="row_vless_host" style="display:none;"> <th width="50%">域名 (SNI/Host)</th>\n'
+            '                                            <td>\n'
+            '                                                <input type="text" maxlength="128" class="input" size="64" name="ss_vless_host" value="<% nvram_get_x("","ss_vless_host"); %>" />\n'
+            '                                            </td>\n'
+            '                                        </tr>\n'
+            '\n'
+            '                                        <tr id="row_vless_path" style="display:none;"> <th width="50%">WS 路径</th>\n'
+            '                                            <td>\n'
+            '                                                <input type="text" maxlength="128" class="input" size="64" name="ss_vless_path" value="<% nvram_get_x("","ss_vless_path"); %>" />\n'
+            '                                            </td>\n'
+            '                                        </tr>\n'
+            '\n'
+            '                                        ')
+        s = s.replace(a, vless_rows + a, 1)
+
+        # 6.4 switch_ss_type 重写: 显隐逻辑支持 type=2
+        old_js = (
+            'function switch_ss_type(){\n'
+            "\tvar v = document.form.ss_type.value; //0:ss-orig;1:ssr\n"
+            "\tshowhide_div('row_ss_protocol', v);\n"
+            "\tshowhide_div('row_ss_protocol_para', v);\n"
+            "\tshowhide_div('row_ss_obfs', v);\n"
+            "\tshowhide_div('row_ss_obfs_para', v);\n"
+            '}\n')
+        assert s.count(old_js) == 1, 'anchor: switch_ss_type js'
+        new_js = (
+            'function switch_ss_type(){\n'
+            "\tvar v = document.form.ss_type.value; //0:ss;1:ssr;2:xray(vless)\n"
+            '\tvar is_ssr = (v == 1);\n'
+            '\tvar is_xray = (v == 2);\n'
+            "\tshowhide_div('row_ss_protocol', is_ssr ? 1 : 0);\n"
+            "\tshowhide_div('row_ss_protocol_para', is_ssr ? 1 : 0);\n"
+            "\tshowhide_div('row_ss_obfs', is_ssr ? 1 : 0);\n"
+            "\tshowhide_div('row_ss_obfs_para', is_ssr ? 1 : 0);\n"
+            "\tshowhide_div('row_ss_method', is_xray ? 0 : 1);\n"
+            "\tshowhide_div('row_ss_timeout', is_xray ? 0 : 1);\n"
+            "\tshowhide_div('row_vless_net', is_xray ? 1 : 0);\n"
+            "\tshowhide_div('row_vless_tls', is_xray ? 1 : 0);\n"
+            "\tshowhide_div('row_vless_host', is_xray ? 1 : 0);\n"
+            "\tshowhide_div('row_vless_path', is_xray ? 1 : 0);\n"
+            '}\n')
+        s = s.replace(old_js, new_js, 1)
+
+        open(p, 'w').write(s)
+        print('Shadowsocks.asp: xray option + vless rows + switch logic')
+        XRAY_ASP_PY
+
+        # 7) web_ex.c: 运行状态检测兼容 xray 进程
+        python3 - << 'XRAY_WEB_PY'
+        p = '/opt/rt-n56u/trunk/user/httpd/web_ex.c'
+        s = open(p).read()
+        a = 'int ss_status_code = pids("ss-redir");'
+        assert s.count(a) == 1, 'anchor: pids ss-redir'
+        s = s.replace(a, a + '\n\tif (!ss_status_code)\n\t\tss_status_code = pids("xray");', 1)
+        open(p, 'w').write(s)
+        print('web_ex.c: status check includes xray')
+        XRAY_WEB_PY
+
+        # 8) 校验
+        grep -q 'ss_vless_net' /opt/rt-n56u/trunk/user/httpd/variables.c
+        grep -q 'dokodemo-door' /opt/rt-n56u/trunk/user/shadowsocks/scripts/shadowsocks.sh
+        grep -q 'xray run -c' /opt/rt-n56u/trunk/user/shadowsocks/scripts/shadowsocks.sh
+        grep -q 'value="2" >Xray (VLESS)' /opt/rt-n56u/trunk/user/www/n56u_ribbon_fixed/Shadowsocks.asp
+        grep -q 'row_vless_net' /opt/rt-n56u/trunk/user/www/n56u_ribbon_fixed/Shadowsocks.asp
+        grep -q '+= xray' /opt/rt-n56u/trunk/user/Makefile
+        grep -q 'pids("xray")' /opt/rt-n56u/trunk/user/httpd/web_ex.c
+        echo "Xray VLESS prepare OK"
+
     - name: Add anti-freeze network watchdog
       run: |
         ###############################################
@@ -236,6 +484,21 @@ jobs:
         # 4. 校验
         grep -q 'network_watchdog' /opt/rt-n56u/trunk/user/scripts/Makefile && echo "Makefile OK"
         grep -q 'network_watchdog' /opt/rt-n56u/trunk/user/rc/rc.c && echo "rc.c OK"
+
+    - name: Setup Go for Xray core build
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        cache: false
+
+    - name: Expose go to sudo build
+      run: |
+        # build_firmware 以 sudo 运行, secure_path 不含 hostedtoolcache → 链到 /usr/local/bin
+        set -e
+        GODIR="$(dirname "$(command -v go)")"
+        sudo ln -sf "$GODIR/go" /usr/local/bin/go
+        sudo ln -sf "$GODIR/gofmt" /usr/local/bin/gofmt
+        go version
 
     - name: Build Firmware
       env:
