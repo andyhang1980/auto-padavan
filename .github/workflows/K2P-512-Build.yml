@@ -115,11 +115,11 @@ jobs:
                r'set(CMAKE_PREFIX_PATH "%s")\n'
                r'set(CMAKE_PROGRAM_PATH "%s/bin")\n'
                r'set(CMAKE_C_FLAGS_INIT "%s -I%s/include")\n'
-               r'set(CMAKE_EXE_LINKER_FLAGS_INIT "-L%s/lib")\n')
+               r'set(CMAKE_EXE_LINKER_FLAGS_INIT "-L%s/lib -Wl,-rpath-link,%s/lib")\n')
         printf_line = (
             "\tprintf '" + fmt + "' "
             '"$(CROSS_COMPILE)gcc" "$(CROSS_COMPILE)g++" "$(STAGEDIR)" "$(STAGEDIR)" '
-            '"$(CPUFLAGS)" "$(STAGEDIR)" "$(STAGEDIR)" > $(THISDIR)/mipsel-tc.cmake ; \\\n')
+            '"$(CPUFLAGS)" "$(STAGEDIR)" "$(STAGEDIR)" "$(STAGEDIR)" > $(THISDIR)/mipsel-tc.cmake ; \\\n')
         new = (
             'configure_ss:\n'
             '\t( cd $(SRC_SS_NAME) ; \\\n'
