@@ -46,11 +46,18 @@ jobs:
         cd shadowsocks-libev-3.3.6
 
         # 1) 补齐 release 包缺失的子模块源码
-        for pair in libcork:libcork ipset:libipset libbloom:libbloom; do
-          repo=${pair%%:*}; dest=${pair##*:}
+        #    必须 checkout 到 tag v3.3.6 的 pinned 提交(与上游 submodules:recursive 一致):
+        #    master 上 libcork/include/libcork/config/version.h 只剩 .in 模板,
+        #    而根 CMakeLists 不生成它 → 用 pinned 提交(含已生成 version.h)避免编译中断
+        PIN_LIBCORK=074e074b26e9e372e90e6ade215217763c8644aa
+        PIN_LIBIPSET=3ea7fe30adf4b39b27d932e5a70a2ddce4adb508
+        PIN_LIBBLOOM=437e1add5a2b9a87797d8c648df7cf5f3ee155a8
+        for pair in "libcork:libcork:$PIN_LIBCORK" "ipset:libipset:$PIN_LIBIPSET" "libbloom:libbloom:$PIN_LIBBLOOM"; do
+          repo=${pair%%:*}; rest=${pair#*:}; dest=${rest%%:*}; sha=${rest##*:}
           if [ -z "$(ls -A "$dest" 2>/dev/null)" ]; then
             mkdir -p "$dest"
-            git clone --depth=1 -q "https://github.com/shadowsocks/$repo.git" "/tmp/sssub-$repo"
+            git clone -q "https://github.com/shadowsocks/$repo.git" "/tmp/sssub-$repo"
+            git -C "/tmp/sssub-$repo" checkout -q --detach "$sha"
             cp -a "/tmp/sssub-$repo/." "$dest/"
             rm -rf "/tmp/sssub-$repo"
           fi
@@ -58,6 +65,7 @@ jobs:
         test -f libcork/src/libcork/core/error.c
         test -f libipset/src/libipset/set/storage.c
         test -f libbloom/bloom.c
+        test -f libcork/include/libcork/config/version.h
 
         # 2) 旧 mips uclibc gcc 对新源码的告警会经 -Werror 变成错误, 去掉 -Werror
         grep -q -- '-Werror' src/CMakeLists.txt
