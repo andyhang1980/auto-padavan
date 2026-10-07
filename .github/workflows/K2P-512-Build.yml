@@ -466,6 +466,23 @@ jobs:
         grep -q 'pids("xray")' /opt/rt-n56u/trunk/user/httpd/web_ex.c
         echo "Xray VLESS prepare OK"
 
+    - name: Bump firmware version
+      run: |
+        set -e
+        ############################################################
+        # 版本号升级: 编译号 099 -> 100, 版本日期 22-12 -> 26-10
+        # 镜像名: K2P-USB-512_3.4.3.9-099.trx -> _3.4.3.9-100.trx
+        # Web UI 构建串随 cflags.mk 的 FWBLDSTR/FWREVSTR 自动更新
+        ############################################################
+        V=/opt/rt-n56u/trunk/versions.inc
+        grep -q '^FIRMWARE_BUILDS_VER=099$' "$V"
+        grep -q '^FIRMWARE_BUILDS_REV=22-12$' "$V"
+        sed -i 's/^FIRMWARE_BUILDS_VER=.*/FIRMWARE_BUILDS_VER=100/' "$V"
+        sed -i 's/^FIRMWARE_BUILDS_REV=.*/FIRMWARE_BUILDS_REV=26-10/' "$V"
+        grep -q '^FIRMWARE_BUILDS_VER=100$' "$V"
+        grep -q '^FIRMWARE_BUILDS_REV=26-10$' "$V"
+        cat "$V"
+
     - name: Add anti-freeze network watchdog
       run: |
         ###############################################
