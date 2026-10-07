@@ -75,6 +75,11 @@ jobs:
         p = '/opt/rt-n56u/trunk/user/shadowsocks/Makefile'
         s = open(p).read()
 
+        # 4.0 SRC_SS_NAME 指向 3.3.6(prepare 步已解压到同目录, extract_ss_test 见目录存在即跳过)
+        a = 'SRC_SS_NAME=shadowsocks-libev-3.3.5'
+        assert s.count(a) == 1, 'anchor: SRC_SS_NAME 3.3.5'
+        s = s.replace(a, 'SRC_SS_NAME=shadowsocks-libev-3.3.6')
+
         # 4.1 all 目标: 只编静态 ss 程序(跳过 shared/doc 等目标)
         a = '\t$(MAKE) -j$(HOST_NCPU) -C $(SRC_SS_NAME)\n'
         assert s.count(a) == 1, 'anchor: all SS make line'
@@ -198,6 +203,7 @@ jobs:
 
         # 6) 校验
         grep -q 'cmake .' "$SSDIR/Makefile"
+        grep -q 'SRC_SS_NAME=shadowsocks-libev-3.3.6' "$SSDIR/Makefile"
         grep -q '$(SRC_SS_NAME)/bin/ss-local' "$SSDIR/Makefile"
         grep -q 'libpcre2' /opt/rt-n56u/trunk/libs/Makefile
         test -f /opt/rt-n56u/trunk/libs/libpcre2/Makefile
